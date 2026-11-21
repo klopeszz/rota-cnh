@@ -1,5 +1,6 @@
 const main = document.querySelector('main');
 const key = 'rota-cnh-v1';
+const accountKey = userId => `${key}:user:${userId}`;
 const lessons = Object.fromEntries(topics.map(topic => [topic[0], topic]));
 const sources = [
   ['Resolução Contran 1.020/2025 · formato da prova','https://www.gov.br/transportes/pt-br/assuntos/transito/conteudo-contran/resolucoes/Resolucao10202025.pdf'],
@@ -9,19 +10,155 @@ const sources = [
   ['Detran-SP · serviços de habilitação','https://www.detran.sp.gov.br/']
 ];
 
-function load() {
+function emptyProgress() { return { read: [], history: [], active: null }; }
+
+function load(storageKey = key) {
   try {
-    const saved = JSON.parse(localStorage.getItem(key));
+    const saved = JSON.parse(localStorage.getItem(storageKey));
     if (saved && Array.isArray(saved.read) && Array.isArray(saved.history)) return saved;
   } catch { /* A sessão atual funciona sem armazenamento. */ }
-  return { read: [], history: [], active: null };
+  return emptyProgress();
 }
 
 let data = load();
 let storageAvailable = true;
+let supabaseClient = null;
+let currentSession = null;
+let activeUserId = null;
+let loadingAccountId = null;
+let currentStorageKey = key;
+let cloudReady = false;
+let syncTimer = null;
+let syncStatus = 'Salvo neste navegador';
+let accountNotice = '';
+let authMode = 'signin';
+
+function mergeProgress(primary, secondary) {
+  const first = primary && Array.isArray(primary.read) && Array.isArray(primary.history) ? primary : emptyProgress();
+  const second = secondary && Array.isArray(secondary.read) && Array.isArray(secondary.history) ? secondary : emptyProgress();
+  const history = new Map();
+  [...first.history, ...second.history].forEach(item => { if (item?.id) history.set(item.id, item); });
+  const firstActive = first.active;
+  const secondActive = second.active;
+  let active = firstActive || secondActive || null;
+  if (firstActive && secondActive) {
+    const firstTime = Number(firstActive.updatedAt || 0);
+    const secondTime = Number(secondActive.updatedAt || 0);
+    active = secondTime >= firstTime ? secondActive : firstActive;
+  }
+  return {
+    read: [...new Set([...first.read, ...second.read])],
+    history: [...history.values()].sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))),
+    active
+  };
+}
+
+function setAccountLink() {
+  const link = document.querySelector('.account-link');
+  if (link) link.textContent = currentSession ? 'Minha conta' : 'Entrar';
+}
+
+async function writeCloudProgress() {
+  if (!supabaseClient || !currentSession || !cloudReady) return null;
+  const { error } = await supabaseClient.from('study_progress').upsert({
+    user_id: currentSession.user.id,
+    state: data,
+    updated_at: new Date().toISOString()
+  }, { onConflict: 'user_id' });
+  return error || null;
+}
+
+async function applySession(session) {
+  currentSession = session;
+  setAccountLink();
+  if (!session) {
+    if (activeUserId) {
+      currentStorageKey = key;
+      data = load(key);
+    }
+    activeUserId = null;
+    loadingAccountId = null;
+    cloudReady = false;
+    syncStatus = 'Salvo neste navegador';
+    if (route() === 'conta') render();
+    return;
+  }
+
+  const userId = session.user.id;
+  if (activeUserId === userId && (cloudReady || loadingAccountId === userId)) return;
+  activeUserId = userId;
+  loadingAccountId = userId;
+  currentStorageKey = accountKey(userId);
+  cloudReady = false;
+  syncStatus = 'Sincronizando…';
+  const localAccount = load(currentStorageKey);
+  const guestData = load(key);
+  const { data: row, error } = await supabaseClient.from('study_progress')
+    .select('state').eq('user_id', userId).maybeSingle();
+
+  if (!currentSession || currentSession.user.id !== userId) return;
+
+  if (error) {
+    data = mergeProgress(localAccount, guestData);
+    loadingAccountId = null;
+    syncStatus = 'Offline: salvo neste aparelho';
+    accountNotice = 'Não consegui sincronizar agora. Seu progresso continua salvo neste navegador; confira a conexão e tente novamente.';
+    render();
+    return;
+  }
+
+  data = mergeProgress(row?.state || emptyProgress(), mergeProgress(localAccount, guestData));
+  try { localStorage.setItem(currentStorageKey, JSON.stringify(data)); } catch { storageAvailable = false; }
+  cloudReady = true;
+  const writeError = await writeCloudProgress();
+  loadingAccountId = null;
+  if (writeError) {
+    syncStatus = 'Offline: salvo neste aparelho';
+    accountNotice = 'Sua conta entrou, mas a sincronização falhou. Seu progresso está salvo localmente e será sincronizado quando a conexão voltar.';
+  } else {
+    try { localStorage.removeItem(key); } catch { /* A cópia local pode permanecer como recuperação. */ }
+    syncStatus = 'Sincronizado na nuvem';
+    accountNotice = 'Progresso sincronizado com sua conta.';
+  }
+  render();
+}
+
+function initializeAuth() {
+  const config = window.ROTA_SUPABASE_CONFIG || {};
+  const clientFactory = window.supabase?.createClient;
+  if (clientFactory && /^https:\/\//.test(config.url || '') && config.publishableKey) {
+    try { supabaseClient = clientFactory(config.url, config.publishableKey); }
+    catch { supabaseClient = null; }
+  }
+  if (!supabaseClient) return;
+  supabaseClient.auth.onAuthStateChange((_event, session) => {
+    setTimeout(() => { void applySession(session); }, 0);
+  });
+  supabaseClient.auth.getSession().then(({ data: sessionData, error }) => {
+    if (error) {
+      accountNotice = 'Não foi possível verificar sua sessão. Tente atualizar a página.';
+      render();
+      return;
+    }
+    void applySession(sessionData.session);
+  });
+}
+
 function save() {
-  try { localStorage.setItem(key, JSON.stringify(data)); }
+  if (data.active) data.active.updatedAt = Date.now();
+  try { localStorage.setItem(currentStorageKey, JSON.stringify(data)); }
   catch { storageAvailable = false; }
+  if (supabaseClient && currentSession && cloudReady) {
+    syncStatus = 'Sincronizando…';
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(async () => {
+      const error = await writeCloudProgress();
+      syncStatus = error ? 'Offline: salvo neste aparelho' : 'Sincronizado na nuvem';
+      if (error) accountNotice = 'Não consegui sincronizar agora. Seu progresso continua salvo neste navegador.';
+      setAccountLink();
+      if (route() === 'conta') render();
+    }, 500);
+  }
 }
 
 const route = () => location.hash.slice(1) || 'inicio';
@@ -219,7 +356,8 @@ function result(id) {
 
 function progressPage() {
   const weak = weakTopics();
-  return `<section class="subpage">${heading('Acompanhamento','Meu progresso','Consulte seus resultados e escolha o que revisar. Os dados ficam neste navegador.')}
+  const description = currentSession ? 'Consulte seus resultados. Seu progresso é sincronizado com sua conta.' : 'Consulte seus resultados. Por enquanto, seus dados ficam neste navegador; entre para sincronizar entre dispositivos.';
+  return `<section class="subpage">${heading('Acompanhamento','Meu progresso',description)}
     <div class="section-head"><h2>Visão geral</h2></div>${stats()}
     <div class="panel"><h2>Desempenho por tema</h2>
     ${topics.map(([id, title]) => { const {rate, total, right} = scores(id);
@@ -234,6 +372,36 @@ function progressPage() {
   </section>`;
 }
 
+function accountPage() {
+  if (currentSession) {
+    const email = String(currentSession.user.email || 'Conta conectada').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+    const badgeClass = syncStatus.startsWith('Offline') ? 'error' : syncStatus.startsWith('Sincronizando') ? 'pending' : '';
+    return `<section class="page">${heading('Conta','Seu progresso acompanha você','Entre com esta conta em outro aparelho para continuar seus estudos.')}
+      <div class="panel account-card"><span class="sync-badge ${badgeClass}">${syncStatus}</span><h2 style="margin-top:18px">Conta conectada</h2><p><strong>${email}</strong></p>
+      <p class="auth-status" role="status" aria-live="polite">${accountNotice}</p>
+      <div class="auth-actions">${button('Sair da conta','signout',true)}${link('Ver meu progresso','progresso')}</div></div>
+    </section>`;
+  }
+  if (!supabaseClient) {
+    return `<section class="page">${heading('Conta','Salvar seu progresso','A conta vai permitir continuar seus simulados em outro celular ou computador.')}
+      <div class="panel account-card"><span class="sync-badge">Modo visitante</span><h2 style="margin-top:18px">Login em configuração</h2>
+      <p>O site ainda salva seu progresso neste navegador. A sincronização por conta será ativada depois de conectar o banco online.</p>
+      <p class="hint">Enquanto isso, evite limpar os dados do navegador para manter seus simulados e temas estudados.</p>
+      <p class="auth-status" role="status" aria-live="polite">${accountNotice}</p></div></section>`;
+  }
+  const signup = authMode === 'signup';
+  return `<section class="page">${heading('Conta',signup ? 'Criar conta' : 'Entrar','Seu progresso fica salvo na nuvem e acompanha você entre dispositivos.')}
+    <div class="panel account-card"><form id="auth-form" class="auth-form">
+      <label for="account-email">E-mail<input id="account-email" name="email" type="email" autocomplete="email" required></label>
+      <label for="account-password">Senha<input id="account-password" name="password" type="password" autocomplete="${signup ? 'new-password' : 'current-password'}" minlength="8" required></label>
+      ${signup ? '<p class="hint">Use pelo menos 8 caracteres. Talvez seja necessário confirmar o e-mail antes do primeiro acesso.</p>' : ''}
+      <button class="button" type="submit" ${authBusy ? 'disabled' : ''}>${authBusy ? 'Aguarde…' : signup ? 'Criar conta' : 'Entrar e sincronizar'}</button>
+    </form><p class="auth-status" role="status" aria-live="polite">${accountNotice}</p>
+    <div class="auth-actions">${signup ? button('Já tenho conta','auth:signin',true) : button('Criar uma conta','auth:signup',true)}
+    ${signup ? '' : '<button class="button secondary" type="button" data-action="auth:reset">Esqueci minha senha</button>'}</div>
+    <p class="hint">O progresso que já está neste navegador será combinado com o da conta no primeiro acesso.</p></div></section>`;
+}
+
 function render(focus = false) {
   const [page, detail] = route().split('/');
   const navPage = ['questoes','resultado'].includes(page) ? 'simulados' : page;
@@ -243,12 +411,13 @@ function render(focus = false) {
   });
   const pages = {
     inicio: home, teoria: () => theory(Object.hasOwn(lessons, detail) ? detail : null),
-    simulados: practice, questoes: quiz, resultado: () => result(detail), progresso: progressPage,
+    simulados: practice, questoes: quiz, resultado: () => result(detail), progresso: progressPage, conta: accountPage,
     fontes: () => `<section class="page">${heading('Referências','Fontes oficiais','Material independente, com resumos e questões autorais. Revisão de referência em 21/11/2026.')}
       <div class="panel"><ul>${sources.map(([label, href]) => `<li><a href="${href}">${label}</a></li>`).join('')}</ul></div></section>`
   };
   main.innerHTML = (Object.hasOwn(pages, page) ? pages[page] : home)() +
     (storageAvailable ? '' : '<p role="status">O navegador bloqueou o armazenamento. O progresso ficará disponível só nesta sessão.</p>');
+  setAccountLink();
   updateTimer();
   if (focus) main.focus();
 }
@@ -267,6 +436,19 @@ main.addEventListener('click', event => {
   const [action, value] = target.dataset.action.split(':');
   if (action === 'start') start(value);
   if (action === 'finish') finish();
+  if (action === 'auth' && value !== 'reset') { authMode = value; accountNotice = ''; render(); }
+  if (action === 'signout' && supabaseClient) {
+    accountNotice = 'Saindo da conta…';
+    supabaseClient.auth.signOut().then(({ error }) => {
+      if (error) { accountNotice = 'Não foi possível sair agora. Tente novamente.'; render(); }
+    });
+  }
+  if (action === 'auth' && value === 'reset') {
+    const email = main.querySelector('#account-email')?.value.trim();
+    if (!email) { accountNotice = 'Digite seu e-mail para receber o link de redefinição.'; render(); return; }
+    supabaseClient.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname + '#conta' })
+      .then(({ error }) => { accountNotice = error ? 'Não consegui enviar o link. Confira o e-mail e tente novamente.' : 'Se este e-mail estiver cadastrado, enviaremos um link para redefinir sua senha.'; render(); });
+  }
   if (action === 'go' && data.active) {
     data.active.current = Number(value);
     save();
@@ -278,6 +460,35 @@ main.addEventListener('click', event => {
     render();
     main.querySelector('[data-action="read:' + value + '"]')?.focus();
   }
+});
+
+let authBusy = false;
+main.addEventListener('submit', async event => {
+  if (event.target.id !== 'auth-form' || !supabaseClient) return;
+  event.preventDefault();
+  const form = event.target;
+  const email = form.elements.email.value.trim();
+  const password = form.elements.password.value;
+  authBusy = true;
+  accountNotice = '';
+  render();
+  const result = authMode === 'signup'
+    ? await supabaseClient.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname + '#conta' } })
+    : await supabaseClient.auth.signInWithPassword({ email, password });
+  authBusy = false;
+  if (result.error) {
+    accountNotice = authMode === 'signup'
+      ? 'Não consegui criar sua conta. Confira o e-mail, a senha e tente novamente.'
+      : 'E-mail ou senha não conferem. Confira os dados e tente novamente.';
+    render();
+    return;
+  }
+  if (authMode === 'signup' && !result.data.session) {
+    accountNotice = 'Conta criada. Confira seu e-mail e confirme o cadastro para entrar.';
+    render();
+    return;
+  }
+  if (result.data.session) void applySession(result.data.session);
 });
 
 main.addEventListener('change', event => {
@@ -296,3 +507,4 @@ window.addEventListener('hashchange', () => {
 setInterval(updateTimer, 1000);
 save();
 render();
+initializeAuth();

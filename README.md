@@ -10,7 +10,7 @@ Abra a pasta do projeto no editor:
 code .
 ```
 
-Abra o arquivo `index.html` no navegador. Para testar com servidor local, execute `py -m http.server 8000` no terminal e acesse <http://localhost:8000>.
+Abra `index.html` com a extensão **Live Server** no VS Code e clique em **Go Live**. O endereço local funciona apenas no computador onde o servidor foi iniciado.
 
 ## Publicar no GitHub Pages
 
@@ -31,6 +31,16 @@ No GitHub, abra **Settings → Pages**. Em **Build and deployment**, escolha **D
 - `index.html` e `styles.css` estruturam a interface responsiva.
 - `conteudo.js` reúne os módulos de estudo e o banco de questões.
 - `app.js` controla simulados, cronômetro, correções, histórico e reforço.
-- O progresso fica no armazenamento local do navegador e depende do endereço em que o site é aberto.
+- Sem login, o progresso fica no armazenamento local deste navegador.
+- Com login ativo, o progresso e os simulados são sincronizados por conta, usando Supabase Auth e a tabela `study_progress` com políticas RLS.
+
+## Ativar login e sincronização
+
+1. Crie um projeto no Supabase e, no **SQL Editor**, execute o conteúdo de `supabase-schema.sql`.
+2. No painel do projeto, em **Authentication → URL Configuration**, defina como URL do site `https://klopeszz.github.io/rota-cnh/` e permita o redirecionamento `https://klopeszz.github.io/rota-cnh/**`. Para testes locais, permita também `http://127.0.0.1:5500/**` e `http://localhost:5500/**`.
+3. Em **Project Settings → API**, copie a **Project URL** e a chave **publishable** (ou a chave pública `anon`, se o projeto ainda mostrar esse nome) para `supabase-config.js`, nos campos `url` e `publishableKey`.
+4. Publique os arquivos atualizados no repositório GitHub Pages. A configuração publishable/anon é pública; nunca coloque `service_role` ou `secret` em arquivos do site.
+
+O primeiro login combina o progresso local existente com o histórico da conta. Os dados de cada conta são protegidos pelas políticas de Row Level Security incluídas no SQL. A autenticação por e-mail pode exigir confirmação conforme a configuração do projeto Supabase.
 
 Os resumos seguem os grandes eixos da Portaria Senatran 923/2025. As questões são autorais. O simulado segue a quantidade e a referência de acertos da Resolução Contran 1.020/2025, com distribuição própria de temas. As referências completas estão na seção **Fontes oficiais** do site.
