@@ -31,6 +31,7 @@ No GitHub, abra **Settings → Pages**. Em **Build and deployment**, escolha **D
 - `index.html` e `styles.css` estruturam a interface responsiva.
 - `conteudo.js` reúne os módulos de estudo e o banco de questões.
 - `app.js` controla simulados, cronômetro, correções, histórico e reforço.
+- Após entrar ou confirmar o cadastro, a pessoa vai para a página inicial; a conta continua acessível pelo menu.
 - Sem login, o progresso fica no armazenamento local deste navegador.
 - Com login ativo, o progresso e os simulados são sincronizados por conta, usando Supabase Auth e a tabela `study_progress` com políticas RLS.
 

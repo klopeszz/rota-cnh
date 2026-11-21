@@ -32,6 +32,7 @@ let syncTimer = null;
 let syncStatus = 'Salvo neste navegador';
 let accountNotice = '';
 let authMode = 'signin';
+let redirectAfterAuth = /type=signup(?:&|$)/.test(location.hash);
 
 function mergeProgress(primary, secondary) {
   const first = primary && Array.isArray(primary.read) && Array.isArray(primary.history) ? primary : emptyProgress();
@@ -56,6 +57,16 @@ function mergeProgress(primary, secondary) {
 function setAccountLink() {
   const link = document.querySelector('.account-link');
   if (link) link.textContent = currentSession ? 'Minha conta' : 'Entrar';
+}
+
+function finishAuthNavigation() {
+  if (!redirectAfterAuth) return false;
+  redirectAfterAuth = false;
+  if (route() !== 'inicio') {
+    location.hash = 'inicio';
+    return true;
+  }
+  return false;
 }
 
 async function writeCloudProgress() {
@@ -85,7 +96,10 @@ async function applySession(session) {
   }
 
   const userId = session.user.id;
-  if (activeUserId === userId && (cloudReady || loadingAccountId === userId)) return;
+  if (activeUserId === userId && (cloudReady || loadingAccountId === userId)) {
+    if (cloudReady && finishAuthNavigation()) return;
+    return;
+  }
   activeUserId = userId;
   loadingAccountId = userId;
   currentStorageKey = accountKey(userId);
@@ -103,7 +117,7 @@ async function applySession(session) {
     loadingAccountId = null;
     syncStatus = 'Offline: salvo neste aparelho';
     accountNotice = 'Não consegui sincronizar agora. Seu progresso continua salvo neste navegador; confira a conexão e tente novamente.';
-    render();
+    if (!finishAuthNavigation()) render();
     return;
   }
 
@@ -120,7 +134,7 @@ async function applySession(session) {
     syncStatus = 'Sincronizado na nuvem';
     accountNotice = 'Progresso sincronizado com sua conta.';
   }
-  render();
+  if (!finishAuthNavigation()) render();
 }
 
 function initializeAuth() {
@@ -473,7 +487,7 @@ main.addEventListener('submit', async event => {
   accountNotice = '';
   render();
   const result = authMode === 'signup'
-    ? await supabaseClient.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname + '#conta' } })
+    ? await supabaseClient.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } })
     : await supabaseClient.auth.signInWithPassword({ email, password });
   authBusy = false;
   if (result.error) {
@@ -488,7 +502,11 @@ main.addEventListener('submit', async event => {
     render();
     return;
   }
-  if (result.data.session) void applySession(result.data.session);
+  if (result.data.session) {
+    redirectAfterAuth = true;
+    await applySession(result.data.session);
+    if (!finishAuthNavigation()) render();
+  }
 });
 
 main.addEventListener('change', event => {
